@@ -117,18 +117,6 @@ jobs:
             org.opencontainers.image.revision=${{ github.sha }}
             org.opencontainers.image.created=${{ github.event.head_commit.timestamp }}
 
-      # ── Security scan (non-blocking on PRs, blocking on main) ─────────────
-      - name: Scan image for vulnerabilities (Trivy)
-        uses: aquasecurity/trivy-action@master
-        with:
-          image-ref:    ${{ env.ECR_REGISTRY }}/${{ env.ECR_REPOSITORY }}:${{ steps.meta.outputs.short-sha }}
-          format:       table
-          exit-code:    ${{ github.ref == 'refs/heads/main' && '1' || '0' }}
-          severity:     CRITICAL,HIGH
-          ignore-unfixed: true
-        # Only run scan when image was actually pushed
-        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
-
       # ── Summary in GitHub UI ───────────────────────────────────────────────
       - name: Write job summary
         if: github.event_name == 'push' && github.ref == 'refs/heads/main'

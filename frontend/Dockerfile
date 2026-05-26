@@ -24,6 +24,11 @@ RUN npm run build
 # ── Stage 3: Minimal nginx runtime ────────────────────────────────────────────
 FROM nginx:1.27-alpine AS runtime
 
+# Upgrade all Alpine packages to their latest patched versions.
+# This fixes OS-level CVEs (openssl, musl, zlib, etc.) that exist in the
+# base image at the time nginx:1.27-alpine was published.
+RUN apk upgrade --no-cache
+
 # Remove default nginx configs
 RUN rm -f /etc/nginx/conf.d/default.conf \
        /etc/nginx/nginx.conf
