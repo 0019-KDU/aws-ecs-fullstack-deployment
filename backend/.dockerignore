@@ -1,0 +1,11 @@
+target/
+.git/
+.gitignore
+.idea/
+*.iml
+*.log
+.mvn/wrapper/maven-wrapper.jar
+HELP.md
+.env
+Dockerfile
+.dockerignore
