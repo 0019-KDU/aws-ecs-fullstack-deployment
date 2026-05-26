@@ -1,0 +1,142 @@
+name: Backend — Build, Test & Push to ECR
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "backend/**"
+      - ".github/workflows/backend-ci.yml"
+  pull_request:
+    branches: [main]
+    paths:
+      - "backend/**"
+      - ".github/workflows/backend-ci.yml"
+
+# Cancel any in-progress run on the same branch to avoid wasted compute
+concurrency:
+  group: backend-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  AWS_REGION:     ap-south-1
+  ECR_REGISTRY:   697502032879.dkr.ecr.ap-south-1.amazonaws.com
+  ECR_REPOSITORY: dev/student-portal-backend
+  JAVA_VERSION:   "21"
+
+permissions:
+  contents: read        # checkout
+  id-token: write       # OIDC → AWS
+
+jobs:
+  # ── Job 1: Run tests (fast feedback — no Docker required) ──────────────────
+  test:
+    name: Unit & Integration Tests
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+
+      - name: Set up Java ${{ env.JAVA_VERSION }}
+        uses: actions/setup-java@v4
+        with:
+          java-version: ${{ env.JAVA_VERSION }}
+          distribution: temurin
+          cache: maven           # caches ~/.m2 between runs
+
+      - name: Run tests
+        working-directory: backend
+        run: mvn verify -B -q
+
+      - name: Upload test report on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: surefire-reports
+          path: backend/target/surefire-reports/
+
+  # ── Job 2: Build Docker image & push to ECR (main branch only) ─────────────
+  build-and-push:
+    name: Docker Build & Push
+    runs-on: ubuntu-latest
+    needs: test             # only runs if tests pass
+
+    outputs:
+      image-tag: ${{ steps.meta.outputs.short-sha }}
+      image-uri: ${{ env.ECR_REGISTRY }}/${{ env.ECR_REPOSITORY }}:${{ steps.meta.outputs.short-sha }}
+
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+
+      # ── AWS authentication via OIDC (no long-lived keys) ───────────────────
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_IAM_ROLE }}
+          aws-region:     ${{ env.AWS_REGION }}
+          role-session-name: github-actions-backend-${{ github.run_id }}
+
+      - name: Login to Amazon ECR
+        id: ecr-login
+        uses: aws-actions/amazon-ecr-login@v2
+
+      # ── Compute image tags ─────────────────────────────────────────────────
+      - name: Compute image metadata
+        id: meta
+        run: |
+          SHORT_SHA="${GITHUB_SHA::8}"
+          echo "short-sha=${SHORT_SHA}" >> $GITHUB_OUTPUT
+          echo "tags<<EOF" >> $GITHUB_OUTPUT
+          echo "${{ env.ECR_REGISTRY }}/${{ env.ECR_REPOSITORY }}:${SHORT_SHA}" >> $GITHUB_OUTPUT
+          # Only tag :latest on main branch pushes
+          if [[ "${{ github.ref }}" == "refs/heads/main" && "${{ github.event_name }}" == "push" ]]; then
+            echo "${{ env.ECR_REGISTRY }}/${{ env.ECR_REPOSITORY }}:latest" >> $GITHUB_OUTPUT
+          fi
+          echo "EOF" >> $GITHUB_OUTPUT
+
+      # ── Docker Buildx for advanced caching ────────────────────────────────
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      # ── Build (PRs: no push; main: push with both tags) ───────────────────
+      - name: Build and push image
+        uses: docker/build-push-action@v6
+        with:
+          context:   ./backend
+          file:      ./backend/Dockerfile
+          target:    runtime
+          push:      ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+          tags:      ${{ steps.meta.outputs.tags }}
+          # GitHub Actions layer cache — free, no ECR cache charges
+          cache-from: type=gha,scope=backend
+          cache-to:   type=gha,scope=backend,mode=max
+          # Embed git metadata into the image
+          labels: |
+            org.opencontainers.image.source=${{ github.repositoryUrl }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.created=${{ github.event.head_commit.timestamp }}
+
+      # ── Security scan (non-blocking on PRs, blocking on main) ─────────────
+      - name: Scan image for vulnerabilities (Trivy)
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref:    ${{ env.ECR_REGISTRY }}/${{ env.ECR_REPOSITORY }}:${{ steps.meta.outputs.short-sha }}
+          format:       table
+          exit-code:    ${{ github.ref == 'refs/heads/main' && '1' || '0' }}
+          severity:     CRITICAL,HIGH
+          ignore-unfixed: true
+        # Only run scan when image was actually pushed
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+
+      # ── Summary in GitHub UI ───────────────────────────────────────────────
+      - name: Write job summary
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        run: |
+          echo "## Backend image pushed to ECR" >> $GITHUB_STEP_SUMMARY
+          echo "| Key | Value |" >> $GITHUB_STEP_SUMMARY
+          echo "|-----|-------|" >> $GITHUB_STEP_SUMMARY
+          echo "| Registry | \`${{ env.ECR_REGISTRY }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| Repository | \`${{ env.ECR_REPOSITORY }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| Tag | \`${{ steps.meta.outputs.short-sha }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| Commit | \`${{ github.sha }}\` |" >> $GITHUB_STEP_SUMMARY

@@ -1,0 +1,139 @@
+name: Frontend — Build, Test & Push to ECR
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - "frontend/**"
+      - ".github/workflows/frontend-ci.yml"
+  pull_request:
+    branches: [main]
+    paths:
+      - "frontend/**"
+      - ".github/workflows/frontend-ci.yml"
+
+# Cancel any in-progress run on the same branch
+concurrency:
+  group: frontend-${{ github.ref }}
+  cancel-in-progress: true
+
+env:
+  AWS_REGION:     ap-south-1
+  ECR_REGISTRY:   697502032879.dkr.ecr.ap-south-1.amazonaws.com
+  ECR_REPOSITORY: dev/student-portal-frontend
+  NODE_VERSION:   "20"
+
+permissions:
+  contents: read
+  id-token: write
+
+jobs:
+  # ── Job 1: Lint & type-check (fast feedback) ───────────────────────────────
+  quality:
+    name: Lint & Type Check
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+
+      - name: Set up Node ${{ env.NODE_VERSION }}
+        uses: actions/setup-node@v4
+        with:
+          node-version: ${{ env.NODE_VERSION }}
+          cache: npm
+          cache-dependency-path: frontend/package-lock.json
+
+      - name: Install dependencies
+        working-directory: frontend
+        run: npm ci --prefer-offline
+
+      - name: TypeScript type check
+        working-directory: frontend
+        run: npm run typecheck
+
+  # ── Job 2: Build Docker image & push to ECR ───────────────────────────────
+  build-and-push:
+    name: Docker Build & Push
+    runs-on: ubuntu-latest
+    needs: quality
+
+    outputs:
+      image-tag: ${{ steps.meta.outputs.short-sha }}
+      image-uri: ${{ env.ECR_REGISTRY }}/${{ env.ECR_REPOSITORY }}:${{ steps.meta.outputs.short-sha }}
+
+    steps:
+      - name: Checkout source
+        uses: actions/checkout@v4
+
+      # ── AWS authentication via OIDC ────────────────────────────────────────
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_IAM_ROLE }}
+          aws-region:     ${{ env.AWS_REGION }}
+          role-session-name: github-actions-frontend-${{ github.run_id }}
+
+      - name: Login to Amazon ECR
+        id: ecr-login
+        uses: aws-actions/amazon-ecr-login@v2
+
+      # ── Compute image tags ─────────────────────────────────────────────────
+      - name: Compute image metadata
+        id: meta
+        run: |
+          SHORT_SHA="${GITHUB_SHA::8}"
+          echo "short-sha=${SHORT_SHA}" >> $GITHUB_OUTPUT
+          echo "tags<<EOF" >> $GITHUB_OUTPUT
+          echo "${{ env.ECR_REGISTRY }}/${{ env.ECR_REPOSITORY }}:${SHORT_SHA}" >> $GITHUB_OUTPUT
+          if [[ "${{ github.ref }}" == "refs/heads/main" && "${{ github.event_name }}" == "push" ]]; then
+            echo "${{ env.ECR_REGISTRY }}/${{ env.ECR_REPOSITORY }}:latest" >> $GITHUB_OUTPUT
+          fi
+          echo "EOF" >> $GITHUB_OUTPUT
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      # ── Build & push ───────────────────────────────────────────────────────
+      # VITE_API_BASE_URL is baked into the static bundle at build time.
+      # For the containerised setup nginx proxies /api/* to the backend,
+      # so the relative path /api/v1 works without knowing the ALB DNS here.
+      - name: Build and push image
+        uses: docker/build-push-action@v6
+        with:
+          context:   ./frontend
+          file:      ./frontend/Dockerfile
+          target:    runtime
+          push:      ${{ github.event_name == 'push' && github.ref == 'refs/heads/main' }}
+          tags:      ${{ steps.meta.outputs.tags }}
+          build-args: |
+            VITE_API_BASE_URL=/api/v1
+          cache-from: type=gha,scope=frontend
+          cache-to:   type=gha,scope=frontend,mode=max
+          labels: |
+            org.opencontainers.image.source=${{ github.repositoryUrl }}
+            org.opencontainers.image.revision=${{ github.sha }}
+            org.opencontainers.image.created=${{ github.event.head_commit.timestamp }}
+
+      # ── Security scan ──────────────────────────────────────────────────────
+      - name: Scan image for vulnerabilities (Trivy)
+        uses: aquasecurity/trivy-action@master
+        with:
+          image-ref:    ${{ env.ECR_REGISTRY }}/${{ env.ECR_REPOSITORY }}:${{ steps.meta.outputs.short-sha }}
+          format:       table
+          exit-code:    ${{ github.ref == 'refs/heads/main' && '1' || '0' }}
+          severity:     CRITICAL,HIGH
+          ignore-unfixed: true
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+
+      # ── Summary ───────────────────────────────────────────────────────────
+      - name: Write job summary
+        if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+        run: |
+          echo "## Frontend image pushed to ECR" >> $GITHUB_STEP_SUMMARY
+          echo "| Key | Value |" >> $GITHUB_STEP_SUMMARY
+          echo "|-----|-------|" >> $GITHUB_STEP_SUMMARY
+          echo "| Registry | \`${{ env.ECR_REGISTRY }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| Repository | \`${{ env.ECR_REPOSITORY }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| Tag | \`${{ steps.meta.outputs.short-sha }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| Commit | \`${{ github.sha }}\` |" >> $GITHUB_STEP_SUMMARY
