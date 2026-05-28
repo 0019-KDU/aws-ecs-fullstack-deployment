@@ -147,7 +147,9 @@ jobs:
       - name: Download current task definition
         run: |
           aws ecs describe-task-definition --task-definition backend \
-            --query taskDefinition > task-definition.json
+            --query taskDefinition --output json \
+            | jq 'del(.taskDefinitionArn,.revision,.status,.requiresAttributes,.compatibilities,.registeredAt,.registeredBy)' \
+            > task-definition.json
 
       - name: Render new task definition with updated image
         id: task-def

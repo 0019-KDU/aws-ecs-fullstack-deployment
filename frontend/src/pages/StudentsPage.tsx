@@ -3,7 +3,7 @@ import { Link, useNavigate } from 'react-router-dom';
 import { useDeleteStudent, useStudentsList } from '../hooks/useStudents';
 import { ApiError } from '../api/http';
 
-const AVATAR_COLORS = ['--indigo', '--teal', '--rose', '--amber', '--violet'] as const;
+const AVATAR_COLORS = ['indigo', 'teal', 'rose', 'amber', 'violet'] as const;
 
 function getAvatarColor(name: string) {
   let hash = 0;
@@ -14,7 +14,7 @@ function getAvatarColor(name: string) {
 function Avatar({ firstName, lastName }: { firstName: string; lastName: string }) {
   const initials = `${firstName[0] ?? ''}${lastName[0] ?? ''}`.toUpperCase();
   const color = getAvatarColor(firstName + lastName);
-  return <div className={`avatar avatar-${color}`}>{initials}</div>;
+  return <div className={`avatar avatar--${color}`}>{initials}</div>;
 }
 
 export default function StudentsPage() {
