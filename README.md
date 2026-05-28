@@ -1,473 +1,553 @@
+<div align="center">
+
 # Student Portal — AWS ECS Fullstack Deployment
 
-A production-grade three-tier Student Portal deployed on AWS ECS Fargate with a fully automated CI/CD pipeline using GitHub Actions and OIDC authentication.
+**Production-grade three-tier application deployed on AWS ECS Fargate with full GitOps CI/CD**
+
+[![AWS](https://img.shields.io/badge/AWS-ECS%20Fargate-FF9900?logo=amazon-aws&logoColor=white)](https://aws.amazon.com/ecs/)
+[![Java](https://img.shields.io/badge/Java-21-007396?logo=openjdk&logoColor=white)](https://openjdk.org/)
+[![Spring Boot](https://img.shields.io/badge/Spring%20Boot-3.4.5-6DB33F?logo=spring-boot&logoColor=white)](https://spring.io/projects/spring-boot)
+[![React](https://img.shields.io/badge/React-19-61DAFB?logo=react&logoColor=black)](https://react.dev/)
+[![MySQL](https://img.shields.io/badge/MySQL-8.4-4479A1?logo=mysql&logoColor=white)](https://www.mysql.com/)
+[![GitHub Actions](https://img.shields.io/badge/GitHub%20Actions-CI%2FCD-2088FF?logo=github-actions&logoColor=white)](https://github.com/features/actions)
+
+<br/>
+
+<img src="docs/full.png" alt="Student Portal — Full System Architecture" width="100%"/>
+
+</div>
 
 ---
 
 ## Table of Contents
 
-- [Application Overview](#application-overview)
-- [System Architecture](#system-architecture)
-- [AWS Infrastructure Architecture](#aws-infrastructure-architecture)
-- [VPC & Network Architecture](#vpc--network-architecture)
-- [Request Flow](#request-flow)
-- [Container Architecture](#container-architecture)
-- [CI/CD Pipeline](#cicd-pipeline)
-- [IAM Configuration](#iam-configuration)
-- [AWS Services Used](#aws-services-used)
-- [Local Development](#local-development)
-- [Environment Variables](#environment-variables)
-- [API Reference](#api-reference)
-- [Security Considerations](#security-considerations)
+1. [Overview](#1-overview)
+2. [Tech Stack](#2-tech-stack)
+3. [Application Preview](#3-application-preview)
+4. [High-Level System Architecture](#4-high-level-system-architecture)
+5. [VPC & Network Topology](#5-vpc--network-topology)
+6. [AWS Service Components](#6-aws-service-components)
+7. [Request Lifecycle](#7-request-lifecycle)
+8. [Container Build Strategy](#8-container-build-strategy)
+9. [CI/CD Pipeline](#9-cicd-pipeline)
+10. [IAM & Security](#10-iam--security)
+11. [Local Development](#11-local-development)
+12. [API Reference](#12-api-reference)
+13. [Project Structure](#13-project-structure)
 
 ---
 
-## Application Overview
+## 1. Overview
 
-| Tier | Technology | Purpose |
-|------|-----------|---------|
-| **Frontend** | React 19 + TypeScript + Vite, nginx | SPA served via nginx on ECS Fargate |
-| **Backend** | Spring Boot 3.4.5, Java 21 | REST API on ECS Fargate |
-| **Database** | MySQL 8.4 | Managed RDS instance |
+This repository contains a **Student Portal** — a CRUD application that demonstrates the deployment of a modern three-tier system on AWS using **infrastructure-as-code-friendly patterns**, **automated CI/CD**, and **production security best practices**.
 
-### Application Screenshots
+**Key Highlights:**
 
-![Student List](docs/application_1.png)
-*Student list with search, pagination, and avatar initials*
-
-![Student Form](docs/application_2.png)
-*Add / Edit student form with validation*
+- Containerized with multi-stage Docker builds (non-root users, CVE-patched base images)
+- Deployed on **AWS ECS Fargate** (serverless containers, no EC2 management)
+- Single **Application Load Balancer** with **path-based routing** for both frontend and backend
+- **Private RDS MySQL** instance accessible only from within the VPC
+- **Secrets management** via AWS SSM Parameter Store (no credentials in code or images)
+- **GitHub Actions CI/CD** with **OIDC authentication** (zero long-lived AWS keys)
+- **Automated deployments** with rolling updates and circuit-breaker rollback
 
 ---
 
-## System Architecture
+## 2. Tech Stack
 
+| Layer | Technology | Version |
+|:------|:-----------|:--------|
+| **Frontend** | React + TypeScript + Vite | 19 / 5.7 / 6 |
+| **Frontend Server** | nginx (Alpine) | 1.27 |
+| **Backend** | Spring Boot + Java | 3.4.5 / 21 |
+| **Database** | MySQL on Amazon RDS | 8.4 |
+| **Container Runtime** | AWS Fargate | Latest |
+| **Container Registry** | Amazon ECR | — |
+| **Load Balancer** | Application Load Balancer | — |
+| **Secrets** | AWS SSM Parameter Store | — |
+| **CI/CD** | GitHub Actions + OIDC | — |
+| **Monitoring** | CloudWatch Logs | — |
+
+---
+
+## 3. Application Preview
+
+<table>
+<tr>
+<td width="50%" align="center">
+<img src="docs/application_1.png" alt="Student List View" />
+<br/>
+<sub><b>Student List</b> — paginated table with search and avatar initials</sub>
+</td>
+<td width="50%" align="center">
+<img src="docs/application_2.png" alt="Student Form" />
+<br/>
+<sub><b>Student Form</b> — validated create/edit form with RFC 7807 error handling</sub>
+</td>
+</tr>
+</table>
+
+---
+
+## 4. High-Level System Architecture
+
+The application follows a **classic three-tier architecture** deployed entirely within a custom AWS VPC. All inbound traffic flows through a single ALB which routes to ECS Fargate tasks based on URL path.
+
+```mermaid
+flowchart TB
+    USER([👤 End User<br/>Browser])
+
+    subgraph AWS["☁️ AWS Cloud — ap-south-1"]
+        IGW[Internet Gateway]
+
+        subgraph VPC["🌐 VPC: project-ecs-vpc (10.0.0.0/16)"]
+
+            subgraph PUB["🟢 Public Subnets (1a + 1b)"]
+                ALB[Application Load Balancer<br/>port 80]
+                NAT[NAT Gateway]
+            end
+
+            subgraph PRIV["🔒 Private Subnets (1a + 1b)"]
+                subgraph ECS["ECS Fargate Cluster"]
+                    FE[Frontend Task<br/>nginx :8080]
+                    BE[Backend Task<br/>Spring Boot :8080]
+                end
+                RDS[(🗄️ RDS MySQL 8.4<br/>port 3306)]
+            end
+        end
+
+        ECR[(📦 ECR<br/>Container Registry)]
+        SSM[🔑 SSM Parameter Store<br/>DB Secrets]
+        CW[📊 CloudWatch Logs]
+    end
+
+    USER -->|HTTPS/HTTP| IGW
+    IGW --> ALB
+    ALB -->|"path: /*"| FE
+    ALB -->|"path: /api/*"| BE
+    BE -->|JDBC :3306| RDS
+    FE -.->|pull image| ECR
+    BE -.->|pull image| ECR
+    BE -.->|read secrets| SSM
+    FE -.->|stream logs| CW
+    BE -.->|stream logs| CW
+    BE -.->|outbound via| NAT
+
+    style ALB fill:#FF9900,stroke:#232F3E,color:#fff
+    style FE fill:#61DAFB,stroke:#232F3E,color:#000
+    style BE fill:#6DB33F,stroke:#232F3E,color:#fff
+    style RDS fill:#4479A1,stroke:#232F3E,color:#fff
+    style ECR fill:#FF9900,stroke:#232F3E,color:#fff
+    style SSM fill:#9d5bd2,stroke:#232F3E,color:#fff
+    style CW fill:#759C3E,stroke:#232F3E,color:#fff
 ```
-┌─────────────────────────────────────────────────────────────────────┐
-│                        AWS Cloud (ap-south-1)                        │
-│                                                                       │
-│   ┌─────────────┐     ┌──────────────────────────────────────────┐  │
-│   │   Internet   │     │        VPC: project-ecs-vpc (10.0.0.0/16)│  │
-│   │   Gateway    │     │                                          │  │
-│   └──────┬──────┘     │  ┌─────────────┐  ┌─────────────────┐   │  │
-│          │             │  │Public Subnet│  │  Public Subnet  │   │  │
-│   ┌──────▼──────┐     │  │ap-south-1a  │  │  ap-south-1b    │   │  │
-│   │             │     │  └──────┬──────┘  └────────┬────────┘   │  │
-│   │  ALB        │─────┼─────────┴──────────────────┘            │  │
-│   │ (port 80)   │     │                   │                      │  │
-│   └──────┬──────┘     │          ┌────────▼─────────┐           │  │
-│          │             │          │  ECS Fargate      │           │  │
-│          │ /api/*      │          │  Cluster          │           │  │
-│          ├─────────────┼─────────►│  ┌─────────────┐ │           │  │
-│          │             │          │  │   Backend   │ │           │  │
-│          │ /*          │          │  │  Container  │ │           │  │
-│          ├─────────────┼─────────►│  │  (port 8080)│ │           │  │
-│          │             │          │  └──────┬──────┘ │           │  │
-│          │             │          │         │         │           │  │
-│          │             │          │  ┌──────▼──────┐  │           │  │
-│          │             │          │  │  Frontend   │  │           │  │
-│          │             │          │  │  Container  │  │           │  │
-│          │             │          │  │  (port 8080)│  │           │  │
-│          │             │          │  └─────────────┘  │           │  │
-│          │             │          └───────────────────┘           │  │
-│          │             │                   │                      │  │
-│          │             │  ┌────────────────▼──────────────────┐   │  │
-│          │             │  │         Private Subnets            │   │  │
-│          │             │  │  ┌──────────────────────────────┐  │   │  │
-│          │             │  │  │   RDS MySQL 8.4 (port 3306)  │  │   │  │
-│          │             │  │  └──────────────────────────────┘  │   │  │
-│          │             │  └────────────────────────────────────┘   │  │
-│          │             └──────────────────────────────────────────┘  │
-└──────────┼──────────────────────────────────────────────────────────┘
-           │
-    ┌──────▼───────┐
-    │   Browser    │
-    └──────────────┘
+
+> **Reference image:** ![VPC View](docs/aws_vpc.png)
+
+---
+
+## 5. VPC & Network Topology
+
+The VPC is divided into **public and private subnets across two availability zones** for high availability. Only the load balancer is exposed to the internet; all compute and data resources live in private subnets.
+
+```mermaid
+flowchart LR
+    subgraph VPC["VPC: 10.0.0.0/16"]
+        direction TB
+
+        subgraph AZ1["📍 Availability Zone: ap-south-1a"]
+            PUB1[Public Subnet 1<br/>10.0.0.0/20]
+            PRIV1[Private Subnet 1<br/>10.0.128.0/20]
+        end
+
+        subgraph AZ2["📍 Availability Zone: ap-south-1b"]
+            PUB2[Public Subnet 2<br/>10.0.16.0/20]
+            PRIV2[Private Subnet 2<br/>10.0.144.0/20]
+        end
+
+        IGW[Internet Gateway]
+        NAT[NAT Gateway]
+
+        IGW --> PUB1
+        IGW --> PUB2
+        PUB1 --> NAT
+        PRIV1 -.->|outbound only| NAT
+        PRIV2 -.->|outbound only| NAT
+    end
+
+    INTERNET([🌍 Internet]) <--> IGW
+
+    style PUB1 fill:#d4edda,stroke:#155724
+    style PUB2 fill:#d4edda,stroke:#155724
+    style PRIV1 fill:#f8d7da,stroke:#721c24
+    style PRIV2 fill:#f8d7da,stroke:#721c24
+    style IGW fill:#FF9900,stroke:#232F3E,color:#fff
+    style NAT fill:#FF9900,stroke:#232F3E,color:#fff
 ```
 
----
+### Resource Placement
 
-## AWS Infrastructure Architecture
-
-### Application Load Balancer
-
-![ALB](docs/aws_alb.png)
-
-The ALB is the single entry point for all traffic. It is **internet-facing** and placed in **public subnets** across two availability zones.
-
-**Listener Rules (HTTP:80):**
-
-![ALB Listener Rules](docs/aws_alb_lis_rule.png)
-
-| Priority | Condition | Action | Target |
-|----------|-----------|--------|--------|
-| 1 | Path: `/api/*` | Forward | `student-portal-backend-tg` |
-| 10 | Path: `/*` | Forward | `student-portal-frontend-tg` |
-| Default | Any | Forward | `student-portal-backend-tg` |
-
-**Target Groups:**
-
-| Name | Port | Protocol | Health Check Path |
-|------|------|----------|-------------------|
-| `student-portal-backend-tg` | 8080 | HTTP | `/actuator/health` |
-| `student-portal-frontend-tg` | 8080 | HTTP | `/healthz` |
-
-![Target Group Monitoring](docs/aws_traget_group_monitroing.png)
-
----
-
-### ECS Cluster
-
-![ECS Cluster](docs/aws_ecs_cluster.png)
-
-**Cluster:** `ecs-student-protal-cluster`  
-**Launch type:** AWS Fargate (serverless containers — no EC2 to manage)
-
-| Service | Task Definition | Desired Tasks | CPU | Memory |
-|---------|----------------|---------------|-----|--------|
-| `backend-service` | `backend` | 1 | 2 vCPU | 8 GB |
-| `frontend-service` | `frontend` | 1 | 2 vCPU | 8 GB |
-
-**ECS Task Definition:**
-
-![ECS Task](docs/aws_ecs_task.png)
-
-Each task definition contains:
-- **Container image** — pulled from ECR at deploy time
-- **Port mappings** — `8080:8080`
-- **Secrets** — pulled from SSM Parameter Store at startup
-- **Log configuration** — CloudWatch Logs (`awslogs` driver)
-- **IAM roles** — `ecsTaskExecutionRole` for ECR pull + SSM read
-
----
-
-### Amazon ECR
-
-![ECR](docs/aws_ecr.png)
-
-Two private ECR repositories:
-
-| Repository | Image | Tag Strategy |
-|------------|-------|-------------|
-| `dev/student-portal-backend` | Spring Boot JAR in layered Docker image | `<git-sha>` + `latest` |
-| `dev/student-portal-frontend` | React SPA served by nginx | `<git-sha>` + `latest` |
-
-Images are tagged with the **first 8 characters of the Git SHA** for full traceability plus `latest` for the most recent main-branch build.
-
----
-
-### Amazon RDS
-
-![RDS](docs/aws_rds.png)
-
-| Setting | Value |
-|---------|-------|
-| Engine | MySQL 8.4 Community |
-| Instance class | db.m7g.large |
-| Storage | 20 GiB gp3 (auto-scaling to 1 TB) |
-| Subnets | Private subnets only |
-| Publicly accessible | No |
-| Encryption | Enabled (AWS managed KMS) |
-| Multi-AZ | No (dev environment) |
-
-**Schema management:** Flyway runs migrations automatically on Spring Boot startup.  
-**Master username:** `admin` (stored in SSM, never in code).
-
----
-
-### AWS Systems Manager Parameter Store
-
-![SSM](docs/aws_ssm.png)
-
-All secrets are stored in SSM Parameter Store. ECS injects them as environment variables before the container starts — the application code never calls SSM directly.
-
-| Parameter | Type | Injected as |
-|-----------|------|-------------|
-| `/student-portal/db/url` | String | `DB_URL` |
-| `/student-portal/db/username` | SecureString | `DB_USERNAME` |
-| `/student-portal/db/password` | SecureString | `DB_PASSWORD` |
-
-**SecureString** parameters are encrypted with `alias/aws/ssm` (AWS managed KMS key).
-
----
-
-## VPC & Network Architecture
-
-![VPC](docs/aws_vpc.png)
-
-```
-VPC: project-ecs-vpc (10.0.0.0/16)
-│
-├── Public Subnets (internet-accessible)
-│   ├── project-ecs-subnet-public1-ap-south-1a
-│   └── project-ecs-subnet-public2-ap-south-1b
-│       └── Route table: 0.0.0.0/0 → Internet Gateway
-│           Resources: ALB, NAT Gateway
-│
-├── Private Subnets (no direct internet access)
-│   ├── project-ecs-subnet-private1-ap-south-1a
-│   └── project-ecs-subnet-private2-ap-south-1b
-│       └── Route table: 0.0.0.0/0 → NAT Gateway
-│           Resources: ECS Tasks, RDS
-│
-├── Internet Gateway: project-ecs-igw
-└── NAT Gateway: project-ecs-nat-public1-ap-south-1a
-    └── Allows private resources to make outbound calls
-        (e.g. ECS tasks pulling from ECR, calling SSM)
-```
+| Resource | Subnet Type | Reason |
+|:---------|:------------|:-------|
+| Application Load Balancer | Public | Must accept internet traffic |
+| NAT Gateway | Public | Provides outbound internet to private subnets |
+| ECS Fargate Tasks | Private | No direct internet access — secure by default |
+| RDS MySQL | Private | Database must never be publicly reachable |
 
 ### Security Groups
 
-| Security Group | Attached to | Inbound Rules |
-|---------------|-------------|---------------|
-| `default` (SG) | ALB, ECS Tasks | All traffic from itself + `0.0.0.0/0` |
-| `ecs-rds-sg` | RDS | MySQL/3306 from default SG |
-
-> **Production note:** In a real production setup, create dedicated SGs per resource with least-privilege rules (e.g., ALB SG allows 80/443 from internet; ECS SG allows 8080 only from ALB SG; RDS SG allows 3306 only from ECS SG).
-
----
-
-## Request Flow
-
-### Browser → Frontend (serving the React SPA)
-
-```
-Browser
-  │  GET http://ecs-lb-xxx.ap-south-1.elb.amazonaws.com/
-  │
-  ▼
-ALB (HTTP:80)
-  │  Listener rule: priority 10, path /* → frontend target group
-  │
-  ▼
-ECS Fargate — Frontend Task (nginx, port 8080)
-  │  nginx serves /usr/share/nginx/html/index.html
-  │  SPA fallback: try_files $uri $uri/ /index.html
-  │
-  ▼
-Browser renders React app
-```
-
-### Browser → Backend (API calls)
-
-```
-Browser (React app)
-  │  GET http://ecs-lb-xxx.ap-south-1.elb.amazonaws.com/api/v1/students
-  │  (VITE_API_BASE_URL baked in at Docker build time)
-  │
-  ▼
-ALB (HTTP:80)
-  │  Listener rule: priority 1, path /api/* → backend target group
-  │
-  ▼
-ECS Fargate — Backend Task (Spring Boot, port 8080)
-  │  Controller → Service → Repository
-  │
-  ▼
-RDS MySQL 8.4 (private subnet, port 3306)
-  │  Flyway migrations + JPA queries
-  │
-  ▼
-JSON response → ALB → Browser
-```
-
-### ECS Task Startup Sequence
-
-```
-ECS receives deploy request
-  │
-  ├─ Pull image from ECR (using ecsTaskExecutionRole)
-  ├─ Read SSM parameters (DB_URL, DB_USERNAME, DB_PASSWORD)
-  ├─ Inject as environment variables
-  │
-  ▼
-Container starts
-  │
-  ├─ Backend: Spring Boot → Flyway migrations → HikariCP pool → Tomcat ready
-  ├─ Frontend: nginx starts on port 8080, serves /healthz
-  │
-  ▼
-ALB health check passes
-  │  Backend:  GET /actuator/health → {"status":"UP"}
-  │  Frontend: GET /healthz → 200 OK
-  │
-  ▼
-Task registered as healthy in target group
-Deployment completes ✓
-```
+| Security Group | Direction | Port | Source / Destination | Purpose |
+|:---------------|:---------:|:----:|:--------------------|:--------|
+| **ALB SG** | Inbound | 80 | `0.0.0.0/0` | Allow HTTP from internet |
+| **ECS Task SG** | Inbound | 8080 | ALB SG | Allow traffic only from ALB |
+| **RDS SG** (`ecs-rds-sg`) | Inbound | 3306 | ECS Task SG | Allow DB connections from ECS only |
 
 ---
 
-## Container Architecture
+## 6. AWS Service Components
 
-### Backend Dockerfile (4-stage build)
+### 6.1 Application Load Balancer
 
+<img src="docs/aws_alb.png" alt="ALB Configuration" width="100%"/>
+
+The ALB acts as the **single front door** for all incoming traffic. It performs:
+- TLS termination (when HTTPS certificate is added)
+- Path-based routing
+- Health checks on backend tasks
+- Cross-zone load balancing
+
+#### Listener Rules
+
+<img src="docs/aws_alb_lis_rule.png" alt="ALB Listener Rules" width="100%"/>
+
+| Priority | Path Pattern | Target Group | Purpose |
+|:--------:|:-------------|:-------------|:--------|
+| **1** | `/api/*` | `student-portal-backend-tg` | Route API requests to Spring Boot |
+| **10** | `/*` | `student-portal-frontend-tg` | Route everything else to React SPA |
+| **Default** | (any) | `student-portal-backend-tg` | Catch-all fallback |
+
+#### Target Groups
+
+| Target Group | Port | Protocol | Health Check Path | Healthy Threshold |
+|:-------------|:----:|:--------:|:------------------|:-----------------:|
+| `student-portal-backend-tg` | 8080 | HTTP | `/actuator/health` | 2 |
+| `student-portal-frontend-tg` | 8080 | HTTP | `/healthz` | 2 |
+
+<img src="docs/aws_traget_group_monitroing.png" alt="Target Group Health" width="100%"/>
+
+---
+
+### 6.2 ECS Fargate Cluster
+
+<img src="docs/aws_ecs_cluster.png" alt="ECS Cluster" width="100%"/>
+
+| Property | Value |
+|:---------|:------|
+| **Cluster Name** | `ecs-student-protal-cluster` |
+| **Launch Type** | AWS Fargate (serverless) |
+| **Network Mode** | `awsvpc` (each task gets its own ENI) |
+| **Operating System** | Linux X86_64 |
+
+#### Services
+
+| Service | Task Definition | Desired Tasks | CPU | Memory | Health Check Grace |
+|:--------|:----------------|:-------------:|:---:|:------:|:------------------:|
+| `backend-service` | `backend` | 1 | 2 vCPU | 8 GB | 90s |
+| `frontend-service` | `frontend` | 1 | 2 vCPU | 8 GB | 30s |
+
+#### Task Definition Anatomy
+
+<img src="docs/aws_ecs_task.png" alt="ECS Task Definition" width="100%"/>
+
+Each task definition declares:
+- **Container image** — pulled from ECR at task start
+- **Port mappings** — exposes `8080` on the task ENI
+- **Secrets** — `valueFrom` references to SSM parameters (injected as env vars)
+- **Log configuration** — streams `stdout`/`stderr` to CloudWatch via `awslogs` driver
+- **IAM execution role** — grants ECS agent permission to pull image & read secrets
+
+---
+
+### 6.3 Amazon ECR (Elastic Container Registry)
+
+<img src="docs/aws_ecr.png" alt="ECR Repositories" width="100%"/>
+
+Two **private** container repositories store immutable images per commit:
+
+| Repository | Contents | Tags |
+|:-----------|:---------|:-----|
+| `dev/student-portal-backend` | Spring Boot layered JAR | `<8-char-sha>` + `latest` |
+| `dev/student-portal-frontend` | React build + nginx | `<8-char-sha>` + `latest` |
+
+**Tagging strategy:**
+- `latest` → most recent successful build from `main` branch
+- `<git-sha>` → immutable reference for full traceability and rollbacks
+
+---
+
+### 6.4 Amazon RDS (MySQL)
+
+<img src="docs/aws_rds.png" alt="RDS Instance" width="100%"/>
+
+| Property | Value |
+|:---------|:------|
+| **Engine** | MySQL 8.4 Community |
+| **Instance Class** | `db.m7g.large` (2 vCPU, 8 GB RAM) |
+| **Storage** | 20 GiB gp3 (auto-scaling to 1 TB) |
+| **Subnet Placement** | Private subnets only |
+| **Public Accessibility** | ❌ Disabled |
+| **Encryption at Rest** | ✅ AWS managed KMS |
+| **Master Username** | `admin` (stored in SSM) |
+
+**Database lifecycle:**
+- Schema is managed by **Flyway migrations** in `backend/src/main/resources/db/migration/`
+- Migrations run **automatically on Spring Boot startup**
+- JPA is configured with `ddl-auto: validate` — Hibernate can never silently modify the schema
+
+---
+
+### 6.5 AWS SSM Parameter Store
+
+<img src="docs/aws_ssm.png" alt="SSM Parameters" width="100%"/>
+
+All sensitive configuration is centralized in SSM and **injected into the container at task startup** by the ECS agent — never embedded in code or images.
+
+| Parameter Name | Type | Injected As (env var) |
+|:---------------|:----:|:----------------------|
+| `/student-portal/db/url` | `String` | `DB_URL` |
+| `/student-portal/db/username` | `SecureString` | `DB_USERNAME` |
+| `/student-portal/db/password` | `SecureString` | `DB_PASSWORD` |
+
+`SecureString` parameters are encrypted with the AWS-managed KMS key `alias/aws/ssm`. The `ecsTaskExecutionRole` is granted `ssm:GetParameters` + `kms:Decrypt` to read them at startup.
+
+---
+
+## 7. Request Lifecycle
+
+### 7.1 Page Load (Browser → Frontend)
+
+```mermaid
+sequenceDiagram
+    autonumber
+    actor User as 👤 Browser
+    participant ALB as ⚖️ ALB
+    participant FE as 🟦 Frontend Task<br/>(nginx :8080)
+
+    User->>ALB: GET / (HTTP)
+    Note over ALB: Match rule: path /*<br/>priority 10
+    ALB->>FE: Forward request
+    FE->>FE: Serve /usr/share/nginx/html/index.html
+    FE-->>ALB: 200 OK + HTML
+    ALB-->>User: HTML + JS bundle
+    User->>User: React app initializes
 ```
-Stage 1: deps (maven:3.9-eclipse-temurin-21-alpine)
-  └── Download Maven dependencies (cached layer)
 
-Stage 2: builder
-  └── mvn package -DskipTests → produces JAR
+### 7.2 API Call (Browser → Backend → Database)
 
-Stage 3: extractor (spring-boot jarmode=tools)
-  └── Extracts layered JAR for optimal Docker caching:
-      dependencies/ snapshot-dependencies/ spring-boot-loader/ application/
+```mermaid
+sequenceDiagram
+    autonumber
+    actor User as 👤 Browser
+    participant ALB as ⚖️ ALB
+    participant BE as 🟩 Backend Task<br/>(Spring Boot :8080)
+    participant DB as 🗄️ RDS MySQL
 
-Stage 4: runtime (eclipse-temurin:21-jre-alpine)
-  └── Non-root user (appuser)
-  └── JAVA_TOOL_OPTIONS with container-aware JVM flags
-  └── EXPOSE 8080
+    User->>ALB: GET /api/v1/students
+    Note over ALB: Match rule: path /api/*<br/>priority 1
+    ALB->>BE: Forward request
+    BE->>BE: Controller → Service
+    BE->>DB: SELECT * FROM students<br/>(via HikariCP pool)
+    DB-->>BE: ResultSet
+    BE->>BE: Map to StudentResponse DTO
+    BE-->>ALB: 200 + JSON
+    ALB-->>User: JSON response
 ```
 
-### Frontend Dockerfile (3-stage build)
+### 7.3 ECS Task Startup
 
-```
-Stage 1: deps (node:20-alpine)
-  └── npm ci --prefer-offline (cached layer)
+```mermaid
+sequenceDiagram
+    autonumber
+    participant ECS as ECS Agent
+    participant ECR as 📦 ECR
+    participant SSM as 🔑 SSM
+    participant TASK as 🐳 Container
 
-Stage 2: builder
-  └── VITE_API_BASE_URL injected as build arg
-  └── npm run build → outputs /app/dist
-
-Stage 3: runtime (nginx:1.27-alpine)
-  └── apk upgrade --no-cache (fixes Alpine CVEs)
-  └── Custom nginx.conf (port 8080, SPA fallback, /healthz)
-  └── Non-root user (nginx)
-  └── EXPOSE 8080
-```
-
-### Docker Compose (local development)
-
-```yaml
-Services:
-  db       → MySQL 8.4 (host port 3307 to avoid conflicts)
-  backend  → Spring Boot (port 8080)
-  frontend → nginx SPA (port 80)
-
-Networks:
-  backend_net  → db ↔ backend only (MySQL never exposed to frontend)
-  frontend_net → backend ↔ frontend
-
-Volumes:
-  db_data → persistent MySQL data
+    ECS->>ECR: Pull image (using execution role)
+    ECR-->>ECS: Image layers
+    ECS->>SSM: GetParameters (DB_URL, DB_USERNAME, DB_PASSWORD)
+    SSM-->>ECS: Decrypted values
+    ECS->>TASK: Start container with env vars injected
+    TASK->>TASK: Spring Boot boots<br/>Flyway runs migrations<br/>HikariCP opens DB pool
+    TASK-->>ECS: GET /actuator/health → 200
+    Note over ECS: Task registered as HEALTHY<br/>in target group
 ```
 
 ---
 
-## CI/CD Pipeline
+## 8. Container Build Strategy
 
-### Architecture
+Both Dockerfiles use **multi-stage builds** to keep production images small, secure, and cache-friendly.
 
-```
-Developer pushes to main
-        │
-        ├──► backend/** changed?
-        │       └── Backend CI Pipeline
-        │
-        └──► frontend/** changed?
-                └── Frontend CI Pipeline
+### 8.1 Backend (4-Stage Build)
 
-Both pipelines share concurrency group "ecs-deploy-prod"
-→ They queue, never run deploy steps simultaneously
-  (prevents vCPU quota exhaustion during rolling updates)
-```
+```mermaid
+flowchart LR
+    A[Stage 1: deps<br/>maven:3.9-jdk-21] -->|cache deps| B[Stage 2: builder<br/>mvn package]
+    B -->|produces JAR| C[Stage 3: extractor<br/>jarmode=tools]
+    C -->|layered JAR| D[Stage 4: runtime<br/>jre-21-alpine<br/>non-root user]
 
-### Authentication — GitHub OIDC → AWS
-
-No long-lived access keys are stored. GitHub proves its identity cryptographically:
-
-```
-GitHub Actions runner
-  │  Generates short-lived OIDC JWT token
-  │
-  ▼
-AWS STS: AssumeRoleWithWebIdentity
-  │  Verifies JWT against GitHub's OIDC provider
-  │  Returns temporary credentials (expire in 1 hour)
-  │
-  ▼
-github-action-role (IAM Role)
-  │  ECR push permissions
-  │  ECS deploy permissions
-  │  SSM read permissions (for task registration)
+    style A fill:#e3f2fd
+    style B fill:#bbdefb
+    style C fill:#90caf9
+    style D fill:#6DB33F,color:#fff
 ```
 
-### Backend Pipeline (`.github/workflows/backend-ci.yml`)
+| Stage | Purpose |
+|:------|:--------|
+| **deps** | Pre-download Maven dependencies (separate layer = better cache hits) |
+| **builder** | Compile + package Spring Boot JAR |
+| **extractor** | Use `jarmode=tools` to split JAR into layers: dependencies, snapshot-dependencies, spring-boot-loader, application |
+| **runtime** | Minimal JRE Alpine image, non-root user (`appuser`), container-aware JVM flags |
 
-```
-Trigger: push/PR to main when backend/** or workflow file changes
+### 8.2 Frontend (3-Stage Build)
 
-Job 1 — Unit & Integration Tests
-  ├── Checkout
-  ├── Setup Java 21 (Temurin) + Maven cache
-  ├── mvn verify -B -q
-  └── Upload surefire reports on failure (artifact)
+```mermaid
+flowchart LR
+    A[Stage 1: deps<br/>node:20-alpine<br/>npm ci] --> B[Stage 2: builder<br/>vite build<br/>VITE_API_BASE_URL injected]
+    B -->|static assets| C[Stage 3: runtime<br/>nginx:1.27-alpine<br/>port 8080, non-root]
 
-Job 2 — Docker Build & Push  [needs: Job 1]
-  ├── Configure AWS credentials (OIDC)
-  ├── Login to ECR
-  ├── Compute image tags (SHORT_SHA + latest)
-  ├── Setup Docker Buildx
-  ├── Build multi-stage image + push to ECR
-  └── Write GitHub Step Summary
-
-Job 3 — Deploy to ECS  [needs: Job 2, main branch only]
-  [concurrency: ecs-deploy-prod — queues behind frontend deploy]
-  ├── Configure AWS credentials (OIDC)
-  ├── Download current task definition JSON
-  ├── Strip read-only fields (jq)
-  ├── Render new task definition with updated image URI
-  ├── Register new task definition revision
-  └── Update ECS service + wait for stability
+    style A fill:#fff3e0
+    style B fill:#ffe0b2
+    style C fill:#61DAFB,color:#000
 ```
 
-### Frontend Pipeline (`.github/workflows/frontend-ci.yml`)
+| Stage | Purpose |
+|:------|:--------|
+| **deps** | Run `npm ci --prefer-offline` to install dependencies once |
+| **builder** | Run `npm run build` with `VITE_API_BASE_URL` as build arg → outputs static `dist/` |
+| **runtime** | Copy `dist/` into nginx, run `apk upgrade --no-cache` to patch Alpine CVEs, listen on port 8080 as non-root |
 
+---
+
+## 9. CI/CD Pipeline
+
+The application has **two independent pipelines** that only trigger when files in their respective directories change. Both pipelines share a deployment concurrency group to prevent simultaneous ECS updates that could exhaust the Fargate vCPU quota.
+
+### 9.1 Pipeline Architecture
+
+```mermaid
+flowchart TB
+    DEV([👨‍💻 Developer]) -->|git push main| GH{GitHub}
+
+    GH -->|"backend/** changed?"| B1
+    GH -->|"frontend/** changed?"| F1
+
+    subgraph BackendPipeline["🟢 Backend CI/CD Pipeline"]
+        B1[Job 1: Tests<br/>mvn verify] -->|✓ pass| B2[Job 2: Build & Push<br/>Docker → ECR]
+        B2 --> B3[Job 3: Deploy to ECS<br/>register task → update service]
+    end
+
+    subgraph FrontendPipeline["🔵 Frontend CI/CD Pipeline"]
+        F1[Job 1: Typecheck<br/>tsc --noEmit] -->|✓ pass| F2[Job 2: Build & Push<br/>Docker → ECR]
+        F2 --> F3[Job 3: Deploy to ECS<br/>register task → update service]
+    end
+
+    B3 -.->|"concurrency: ecs-deploy-prod<br/>(serialized)"| F3
+
+    B3 --> AWS[(🟠 AWS ECS Fargate)]
+    F3 --> AWS
+
+    style BackendPipeline fill:#e8f5e9,stroke:#2e7d32
+    style FrontendPipeline fill:#e3f2fd,stroke:#1565c0
+    style AWS fill:#FF9900,color:#fff
 ```
-Trigger: push/PR to main when frontend/** or workflow file changes
 
-Job 1 — Lint & Type Check
-  ├── Checkout
-  ├── Setup Node 20 + npm cache
-  ├── npm ci --prefer-offline
-  └── npm run typecheck (tsc --noEmit)
+### 9.2 Authentication — GitHub OIDC → AWS
 
-Job 2 — Docker Build & Push  [needs: Job 1]
-  ├── Configure AWS credentials (OIDC)
-  ├── Login to ECR
-  ├── Compute image tags (SHORT_SHA + latest)
-  ├── Setup Docker Buildx
-  ├── Build image with VITE_API_BASE_URL build arg (from GitHub secret)
-  ├── Push to ECR
-  └── Write GitHub Step Summary
+No long-lived AWS access keys are stored in GitHub. Each pipeline run uses **temporary credentials** obtained via OIDC federation:
 
-Job 3 — Deploy to ECS  [needs: Job 2, main branch only]
-  [concurrency: ecs-deploy-prod — queues behind backend deploy]
-  ├── Configure AWS credentials (OIDC)
-  ├── Download current task definition JSON
-  ├── Strip read-only fields (jq)
-  ├── Render new task definition with updated image URI
-  ├── Register new task definition revision
-  └── Update ECS service + wait for stability
+```mermaid
+sequenceDiagram
+    autonumber
+    participant GH as GitHub Actions Runner
+    participant OIDC as GitHub OIDC Provider
+    participant STS as AWS STS
+    participant IAM as github-action-role
+    participant AWS as AWS Services
+
+    GH->>OIDC: Request OIDC JWT token
+    OIDC-->>GH: Signed JWT
+    GH->>STS: AssumeRoleWithWebIdentity(jwt)
+    STS->>STS: Verify JWT signature & claims
+    STS-->>GH: Temporary credentials<br/>(15 min – 1 hour)
+    GH->>AWS: API calls (ECR, ECS) with temp creds
+    AWS-->>GH: Response
 ```
 
-### GitHub Secrets Required
+### 9.3 Pipeline Jobs (Detailed)
 
-| Secret | Description |
-|--------|-------------|
-| `AWS_IAM_ROLE` | ARN of `github-action-role` (OIDC assumed role) |
+#### Backend Pipeline — `.github/workflows/backend-ci.yml`
+
+| Job | Steps | Triggers |
+|:----|:------|:---------|
+| **1. Tests** | Checkout → Setup Java 21 → Maven cache → `mvn verify -B -q` → Upload surefire reports on failure | All push/PR to `backend/**` |
+| **2. Build & Push** | Configure AWS OIDC → ECR login → Compute tags → Docker Buildx → Build multi-stage image → Push to ECR | `main` branch only |
+| **3. Deploy** | Configure AWS OIDC → Download task definition → Strip read-only fields → Render new task definition with new image URI → Register revision → Update service → Wait for stability | `main` branch only |
+
+#### Frontend Pipeline — `.github/workflows/frontend-ci.yml`
+
+| Job | Steps | Triggers |
+|:----|:------|:---------|
+| **1. Typecheck** | Checkout → Setup Node 20 → npm cache → `npm ci` → `npm run typecheck` | All push/PR to `frontend/**` |
+| **2. Build & Push** | Configure AWS OIDC → ECR login → Compute tags → Docker Buildx → Build with `VITE_API_BASE_URL` build arg → Push to ECR | `main` branch only |
+| **3. Deploy** | Same as backend deploy job (with frontend service) | `main` branch only |
+
+### 9.4 GitHub Secrets
+
+| Secret Name | Purpose |
+|:------------|:--------|
+| `AWS_IAM_ROLE` | ARN of `github-action-role` to assume via OIDC |
 | `ECS_CLUSTER` | ECS cluster name |
 | `ECS_BACKEND_SERVICE` | Backend ECS service name |
 | `ECS_FRONTEND_SERVICE` | Frontend ECS service name |
-| `VITE_API_BASE_URL` | Full ALB URL + `/api/v1` (baked into frontend image) |
+| `VITE_API_BASE_URL` | Full ALB URL + `/api/v1` (baked into frontend image at build time) |
 
 ---
 
-## IAM Configuration
+## 10. IAM & Security
 
-### github-action-role
+### 10.1 IAM Role Structure
 
-**Trust Policy** — allows GitHub Actions to assume this role via OIDC:
+```mermaid
+flowchart TB
+    subgraph GH["GitHub Actions"]
+        OIDC[OIDC Token]
+    end
+
+    subgraph IAM["AWS IAM"]
+        ROLE1[github-action-role]
+        ROLE2[ecsTaskExecutionRole]
+
+        ROLE1 -->|AmazonEC2ContainerRegistry<br/>FullAccess| ECR1[ECR Push/Pull]
+        ROLE1 -->|ECSDeployPolicy<br/>inline| ECS1[ECS Deploy]
+        ROLE1 -->|iam:PassRole<br/>condition| PASS[Pass to ecs-tasks]
+
+        ROLE2 -->|AmazonECSTaskExecution<br/>RolePolicy| ECR2[ECR Pull]
+        ROLE2 -->|AmazonECSTaskExecution<br/>RolePolicy| CW[CloudWatch Logs]
+        ROLE2 -->|StudentPortalSSMAccess<br/>inline| SSM[SSM Read + KMS Decrypt]
+    end
+
+    OIDC -->|AssumeRoleWith<br/>WebIdentity| ROLE1
+    ECSAgent[ECS Agent] -->|sts:AssumeRole| ROLE2
+
+    style ROLE1 fill:#c8e6c9,stroke:#2e7d32
+    style ROLE2 fill:#bbdefb,stroke:#1565c0
+```
+
+### 10.2 `github-action-role`
+
+**Trust Policy** (who can assume this role):
 
 ```json
 {
@@ -492,14 +572,14 @@ Job 3 — Deploy to ECS  [needs: Job 2, main branch only]
 }
 ```
 
-**Attached Policies:**
+**Permissions:**
 
 | Policy | Type | Purpose |
-|--------|------|---------|
+|:-------|:----:|:--------|
 | `AmazonEC2ContainerRegistryFullAccess` | AWS Managed | Push images to ECR |
-| `ECSDeployPolicy` | Inline | Register task definitions, update services |
+| `ECSDeployPolicy` | Inline | Register task definitions, update ECS services |
 
-**ECSDeployPolicy (inline):**
+**`ECSDeployPolicy` (inline):**
 
 ```json
 {
@@ -529,11 +609,9 @@ Job 3 — Deploy to ECS  [needs: Job 2, main branch only]
 }
 ```
 
----
+### 10.3 `ecsTaskExecutionRole`
 
-### ecsTaskExecutionRole
-
-**Trust Policy** — allows ECS Tasks to assume this role:
+**Trust Policy** (who can assume this role):
 
 ```json
 {
@@ -541,23 +619,21 @@ Job 3 — Deploy to ECS  [needs: Job 2, main branch only]
   "Statement": [
     {
       "Effect": "Allow",
-      "Principal": {
-        "Service": "ecs-tasks.amazonaws.com"
-      },
+      "Principal": { "Service": "ecs-tasks.amazonaws.com" },
       "Action": "sts:AssumeRole"
     }
   ]
 }
 ```
 
-**Attached Policies:**
+**Permissions:**
 
 | Policy | Type | Purpose |
-|--------|------|---------|
-| `AmazonECSTaskExecutionRolePolicy` | AWS Managed | Pull images from ECR, write to CloudWatch Logs |
-| `StudentPortalSSMAccess` | Inline | Read SSM parameters at task startup |
+|:-------|:----:|:--------|
+| `AmazonECSTaskExecutionRolePolicy` | AWS Managed | Pull from ECR, write to CloudWatch Logs |
+| `StudentPortalSSMAccess` | Inline | Read SSM parameters + decrypt with KMS |
 
-**StudentPortalSSMAccess (inline):**
+**`StudentPortalSSMAccess` (inline):**
 
 ```json
 {
@@ -577,126 +653,134 @@ Job 3 — Deploy to ECS  [needs: Job 2, main branch only]
 }
 ```
 
----
+### 10.4 Security Best Practices Applied
 
-## AWS Services Used
-
-| Service | Usage |
-|---------|-------|
-| **ECS Fargate** | Runs backend and frontend containers (serverless) |
-| **ECR** | Private Docker image registry |
-| **RDS MySQL 8.4** | Managed relational database |
-| **ALB** | Load balancing + path-based routing |
-| **VPC** | Network isolation with public/private subnets |
-| **SSM Parameter Store** | Secrets management (DB credentials) |
-| **CloudWatch Logs** | Container log aggregation |
-| **IAM** | OIDC federation + least-privilege roles |
-| **STS** | Temporary credential issuance for GitHub OIDC |
-| **KMS** | Encryption of SecureString parameters |
+| Concern | Solution |
+|:--------|:---------|
+| ❌ Long-lived AWS keys | ✅ GitHub OIDC → STS temporary credentials |
+| ❌ Hardcoded DB passwords | ✅ SSM Parameter Store (SecureString + KMS encryption) |
+| ❌ Running containers as root | ✅ Both images use dedicated non-root users |
+| ❌ Public database | ✅ RDS in private subnet, no public IP |
+| ❌ Public application servers | ✅ ECS tasks in private subnet, only ALB is public |
+| ❌ Unpatched base image CVEs | ✅ `apk upgrade --no-cache` + pinned Tomcat version |
+| ❌ Lost updates in concurrent edits | ✅ JPA optimistic locking via `@Version` |
+| ❌ Schema drift | ✅ Flyway migrations + `ddl-auto: validate` |
 
 ---
 
-## Local Development
+## 11. Local Development
 
-### Prerequisites
+### 11.1 Prerequisites
 
 | Tool | Version |
-|------|---------|
+|:-----|:-------:|
 | JDK | 21 |
 | Maven | 3.9+ |
 | Node.js | 20 LTS |
-| npm | 10+ |
-| Docker | 24+ |
-| Docker Compose | v2 |
+| Docker + Docker Compose | 24+ / v2 |
 
-### Quick Start (Docker Compose)
+### 11.2 Run with Docker Compose (Recommended)
 
 ```bash
-# Copy and fill in your passwords
+# 1. Copy environment template
 cp .env.example .env
 
-# Start all three services
+# 2. Edit .env with your DB password
+
+# 3. Start the entire stack
 docker compose up --build
 
-# Access:
-# Frontend: http://localhost:80
-# Backend API: http://localhost:8080
-# Swagger UI: http://localhost:8080/swagger-ui.html
+# Access points:
+#   Frontend → http://localhost
+#   Backend  → http://localhost:8080
+#   Swagger  → http://localhost:8080/swagger-ui.html
 ```
 
-### Manual Start
+### 11.3 Run Each Tier Manually
 
-**1. Database**
+<details>
+<summary><b>1. Start MySQL</b></summary>
+
 ```bash
 mysql -u root -p < database/01_create_database.sql
 ```
+</details>
 
-**2. Backend**
+<details>
+<summary><b>2. Start Spring Boot Backend</b></summary>
+
 ```bash
 cd backend
-export DB_URL=jdbc:mysql://localhost:3306/student_portal?useSSL=false&serverTimezone=UTC
+
+export DB_URL="jdbc:mysql://localhost:3306/student_portal?useSSL=false&serverTimezone=UTC"
 export DB_USERNAME=student_portal
 export DB_PASSWORD=your_password
-mvn spring-boot:run
-# API at http://localhost:8080
-```
 
-**3. Frontend**
+mvn spring-boot:run
+# API listens on http://localhost:8080
+```
+</details>
+
+<details>
+<summary><b>3. Start React Frontend</b></summary>
+
 ```bash
 cd frontend
 npm install
 npm run dev
-# SPA at http://localhost:5173 (proxies /api/* to localhost:8080)
+# SPA listens on http://localhost:5173
+# Vite proxies /api/* → http://localhost:8080
 ```
+</details>
 
----
+### 11.4 Environment Variables Reference
 
-## Environment Variables
-
-### Backend
+#### Backend (runtime)
 
 | Variable | Default | Description |
-|----------|---------|-------------|
-| `DB_URL` | `jdbc:mysql://localhost:3306/student_portal?...` | JDBC connection URL |
-| `DB_USERNAME` | `root` | Database username |
-| `DB_PASSWORD` | `12345@dev` | Database password |
+|:---------|:--------|:------------|
+| `DB_URL` | `jdbc:mysql://localhost:3306/student_portal?...` | JDBC connection string |
+| `DB_USERNAME` | `root` | Database user |
+| `DB_PASSWORD` | `root` | Database password |
 | `SERVER_PORT` | `8080` | HTTP port |
-| `CORS_ALLOWED_ORIGINS` | `http://localhost:5173` | Allowed CORS origins |
+| `CORS_ALLOWED_ORIGINS` | `http://localhost:5173` | Allowed CORS origins (comma-separated) |
 
-### Frontend (build-time)
+#### Frontend (build-time only)
 
 | Variable | Default | Description |
-|----------|---------|-------------|
-| `VITE_API_BASE_URL` | `/api/v1` | Base URL for all API calls (baked in at `docker build`) |
+|:---------|:--------|:------------|
+| `VITE_API_BASE_URL` | `/api/v1` | API base URL — baked in at `docker build` time |
 
-In ECS, `VITE_API_BASE_URL` is set to the full ALB URL (e.g., `http://ecs-lb-xxx.ap-south-1.elb.amazonaws.com/api/v1`) via the `VITE_API_BASE_URL` GitHub Secret and injected at image build time by the CI pipeline.
+> In production (ECS), `VITE_API_BASE_URL` is set to the full ALB URL via the GitHub Secret of the same name and is injected as a Docker build argument by the CI pipeline.
 
 ---
 
-## API Reference
+## 12. API Reference
 
 **Base URL:** `http://<alb-dns>/api/v1`
 
-| Method | Endpoint | Description | Success |
-|--------|----------|-------------|---------|
+### Endpoints
+
+| Method | Endpoint | Description | Success Status |
+|:------:|:---------|:------------|:--------------:|
 | `GET` | `/students` | Paginated list with optional search | 200 |
-| `GET` | `/students/{id}` | Get one student | 200 |
+| `GET` | `/students/{id}` | Get a single student | 200 |
 | `POST` | `/students` | Create student | 201 + Location header |
-| `PUT` | `/students/{id}` | Full update | 200 |
-| `DELETE` | `/students/{id}` | Delete | 204 |
-| `GET` | `/actuator/health` | Health probe | 200 |
-| `GET` | `/swagger-ui.html` | Interactive API docs | 200 |
+| `PUT` | `/students/{id}` | Replace student | 200 |
+| `DELETE` | `/students/{id}` | Delete student | 204 |
+| `GET` | `/actuator/health` | Health check | 200 |
+| `GET` | `/swagger-ui.html` | Interactive API explorer | 200 |
 
-**Query parameters for `GET /students`:**
+### Query Parameters — `GET /students`
 
-| Parameter | Type | Description |
-|-----------|------|-------------|
-| `page` | int | Page number (0-based, default 0) |
-| `size` | int | Page size (default 10) |
-| `sort` | string | e.g. `lastName,asc` |
-| `search` | string | Searches firstName, lastName, email |
+| Parameter | Type | Default | Description |
+|:----------|:----:|:-------:|:------------|
+| `page` | `int` | `0` | Page number (0-based) |
+| `size` | `int` | `10` | Items per page |
+| `sort` | `string` | `lastName,asc` | `field,direction` |
+| `search` | `string` | — | Searches `firstName`, `lastName`, `email` |
 
-**Error format (RFC 7807):**
+### Error Response Format (RFC 7807 — `application/problem+json`)
 
 ```json
 {
@@ -714,51 +798,51 @@ In ECS, `VITE_API_BASE_URL` is set to the full ALB URL (e.g., `http://ecs-lb-xxx
 
 ---
 
-## Security Considerations
-
-| Area | Implementation |
-|------|---------------|
-| **No static AWS keys** | GitHub OIDC generates temporary credentials per run |
-| **No secrets in code** | DB credentials in SSM Parameter Store (SecureString) |
-| **Non-root containers** | Both backend (`appuser`) and frontend (`nginx` user) run as non-root |
-| **Private database** | RDS in private subnet, not publicly accessible |
-| **Private ECS tasks** | ECS tasks in private subnet, only ALB is public |
-| **Encrypted secrets** | SSM SecureString encrypted with KMS |
-| **Image CVE patching** | Backend: Tomcat pinned to latest; Frontend: `apk upgrade --no-cache` |
-| **Network isolation** | Separate public/private subnets; ECS cannot be reached directly |
-| **Optimistic locking** | `@Version` on Student entity prevents lost updates |
-
----
-
-## Project Structure
+## 13. Project Structure
 
 ```
 aws-ecs-fullstack-deployment/
-├── .github/
-│   └── workflows/
-│       ├── backend-ci.yml       CI/CD pipeline for Spring Boot
-│       └── frontend-ci.yml      CI/CD pipeline for React
-├── backend/
-│   ├── src/
-│   │   ├── main/java/com/studentportal/
-│   │   │   ├── student/         Controller, Service, Repository, DTOs
-│   │   │   └── common/          GlobalExceptionHandler, ApiError
-│   │   └── main/resources/
-│   │       ├── application.yml
-│   │       └── db/migration/    Flyway SQL migrations
-│   ├── Dockerfile               4-stage layered build
+│
+├── .github/workflows/
+│   ├── backend-ci.yml              # Backend CI/CD pipeline (3 jobs)
+│   └── frontend-ci.yml             # Frontend CI/CD pipeline (3 jobs)
+│
+├── backend/                        # Spring Boot REST API
+│   ├── src/main/java/com/studentportal/
+│   │   ├── student/                # Entity, Repository, Service, Controller, DTOs
+│   │   └── common/                 # GlobalExceptionHandler, ApiError
+│   ├── src/main/resources/
+│   │   ├── application.yml         # Spring Boot config (env-driven)
+│   │   └── db/migration/           # Flyway SQL migrations
+│   ├── Dockerfile                  # 4-stage layered build
 │   └── pom.xml
-├── frontend/
+│
+├── frontend/                       # React 19 SPA
 │   ├── src/
-│   │   ├── api/                 Axios instance + typed endpoints
-│   │   ├── hooks/               TanStack Query hooks
-│   │   └── pages/               StudentsPage, StudentFormPage, NotFoundPage
-│   ├── Dockerfile               3-stage nginx build
-│   ├── nginx.conf               SPA config, port 8080, /healthz
+│   │   ├── api/                    # Axios instance + typed endpoints
+│   │   ├── hooks/                  # TanStack Query hooks
+│   │   ├── pages/                  # Page components (Students, Form, NotFound)
+│   │   ├── App.tsx                 # Router + sidebar layout
+│   │   └── styles.css              # Modern admin panel styling
+│   ├── Dockerfile                  # 3-stage nginx build
+│   ├── nginx.conf                  # SPA config, port 8080, /healthz
 │   └── package.json
+│
 ├── database/
-│   └── 01_create_database.sql   One-time DB + user bootstrap
-├── docs/                        Architecture screenshots
-├── docker-compose.yml           Local development stack
-└── README.md
+│   └── 01_create_database.sql      # Initial DB + user bootstrap script
+│
+├── docs/                           # Architecture screenshots used in this README
+│
+├── docker-compose.yml              # Local dev stack (MySQL + backend + frontend)
+└── README.md                       # You are here
 ```
+
+---
+
+<div align="center">
+
+**Built with ❤️ for production-grade AWS deployments**
+
+[Report a Bug](../../issues) · [Request a Feature](../../issues)
+
+</div>
